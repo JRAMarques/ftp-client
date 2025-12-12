@@ -8,9 +8,11 @@
 #include <regex.h>
 #include <termios.h>
 #include <netdb.h>
+#include <ctype.h>
 
 #define FTP_PORT 21
 #define BUFFER 1024
+#define MAX_LENGTH 1024
 
 #define SV_READY4AUTH           220
 #define SV_READY4PASS           331

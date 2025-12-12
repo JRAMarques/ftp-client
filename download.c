@@ -14,13 +14,13 @@ int parse(char *input, struct URL *url){
     if (at && (slash = strchr(p, '/')) && at<slash){
         char creeds[256];
         size_t clen = (size_t)(at-p);
-        if (clen >= sizeof(creds))  return -1;
-        memcpy(creds, p, clen);
-        creds[clen] = '\0';
-        char *colon = strchr(creds, ':');
+        if (clen >= sizeof(creeds))  return -1;
+        memcpy(creeds, p, clen);
+        creeds[clen] = '\0';
+        char *colon = strchr(creeds, ':');
         if (!colon) return -1;
         *colon = '\0';
-        strncpy(url->user, creds, MAX_LENGTH-1);
+        strncpy(url->user, creeds, MAX_LENGTH-1);
         strncpy(url->password, colon+1, MAX_LENGTH-1);
         p = at + 1;
     }   else    {
@@ -31,7 +31,7 @@ int parse(char *input, struct URL *url){
     slash = strchr(p, '/');
     if (!slash){
         strncpy(url->host, p, MAX_LENGTH-1);
-        strncpy(url->resource, '/', MAX_LENGTH-1);
+        strncpy(url->resource, "/", MAX_LENGTH-1);
         strncpy(url->file, "index", MAX_LENGTH-1);
     }   else    {
         size_t hlen = (size_t)(slash-p);
@@ -108,7 +108,7 @@ int readResponse(const int socket, char *buffer){
             if (firstCode==0){
                 if (isdigit((unsigned char)line[0]) && isdigit((unsigned char)line[1]) && isdigit((unsigned char)line[2])){
                     char codeStr[4] = {line[0], line[1], line[2], '\0'};
-                    firstCode = atoi(codeStr)<
+                    firstCode = atoi(codeStr);
                     if (line[3] == '-'){
                         multiline = 1;
                     }   else    {
@@ -120,7 +120,7 @@ int readResponse(const int socket, char *buffer){
                     strncpy(buffer, line, MAX_LENGTH-1);
                 }
             }   else    {
-                if(isdigit((unsigned char)line[0]) && isdigit((unsigned char)line[1]) && isdigit((unsigned char)line[2]) && line[3]=' '){
+                if(isdigit((unsigned char)line[0]) && isdigit((unsigned char)line[1]) && isdigit((unsigned char)line[2]) && line[3]==' '){
                     char codeStr[4] = {line[0], line[1], line[2], '\0'};
                     int codeNow = atoi(codeStr);
                     if (codeNow == firstCode){
@@ -150,7 +150,6 @@ int authConn(const int socket, const char *user, const char *pass){
     int code = readResponse(socket, buffer);
     if (code == SV_READY4PASS) {
         snprintf(cmd, sizeof(cmd), "PASS %s\r\n", pass);
-        if (send_cmd(socket, cmd) < 0)  { perror("send PASS"); return -1;}
         code = readResponse(socket, buffer);
         return code;
     }   else if (code == SV_LOGINSUCCESS)   {
@@ -174,7 +173,7 @@ int passiveMode(const int socket, char* ip, int *port){
         if (!p) return -1;
         if (sscanf(p, "(%d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2) != 6) return -1;
     }
-    snprintf(ip, MAX_LENGTH, "%d,%d,%d,%d,%d,%d", h1, h2, h3, h4);
+    snprintf(ip, MAX_LENGTH, "%d,%d,%d,%d,%d,%d", h1, h2, h3, h4, p1, p2);
     *port = p1 * 256 + p2;
     return code;
 }
@@ -215,4 +214,81 @@ int closeConnection(const int socketA, const int socketB){
     close(socketB);
     if (code == SV_GOODBYE)     return 0;
     return -1;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s ftp://[<user>:<password>@]<host>/<url-path>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    struct URL url;
+    if (parse(argv[1], &url) != 0) {
+        fprintf(stderr, "Error parsing URL.\n");
+        return EXIT_FAILURE;
+    }
+
+    printf("Host: %s\nResource: %s\nFile: %s\nUser: %s\nPassword: %s\nIP: %s\n",
+           url.host, url.resource, url.file, url.user, url.password, url.ip);
+
+    int ctrl = createSocket(url.ip, FTP_PORT);
+    if (ctrl < 0) {
+        fprintf(stderr, "Failed to connect to control socket %s:%d\n", url.ip, FTP_PORT);
+        return EXIT_FAILURE;
+    }
+
+    char buffer[MAX_LENGTH];
+    int code = readResponse(ctrl, buffer);
+    if (code != SV_READY4AUTH && code != SV_READY4PASS && code != SV_LOGINSUCCESS) {
+        fprintf(stderr, "Unexpected welcome code %d\n", code);
+        close(ctrl);
+        return EXIT_FAILURE;
+    }
+
+    code = authConn(ctrl, url.user, url.password);
+    if (code != SV_LOGINSUCCESS) {
+        fprintf(stderr, "Authentication failed (code %d)\n", code);
+        close(ctrl);
+        return EXIT_FAILURE;
+    }
+
+    char data_ip[MAX_LENGTH];
+    int data_port = 0;
+    code = passiveMode(ctrl, data_ip, &data_port);
+    if (code != SV_PASSIVE) {
+        fprintf(stderr, "PASV failed (code %d)\n", code);
+        close(ctrl);
+        return EXIT_FAILURE;
+    }
+    printf("PASV -> %s:%d\n", data_ip, data_port);
+
+    int data = createSocket(data_ip, data_port);
+    if (data < 0) {
+        fprintf(stderr, "Failed to connect data socket %s:%d\n", data_ip, data_port);
+        close(ctrl);
+        return EXIT_FAILURE;
+    }
+
+    code = requestResource(ctrl, url.resource);
+    if (code != SV_READY4TRANSFER && code != SV_TRANSFER_COMPLETE) {
+        fprintf(stderr, "RETR failed or unexpected code %d\n", code);
+        close(ctrl);
+        close(data);
+        return EXIT_FAILURE;
+    }
+
+    code = getResource(ctrl, data, url.file);
+    if (code != SV_TRANSFER_COMPLETE) {
+        fprintf(stderr, "Transfer did not complete properly (code %d)\n", code);
+        close(ctrl);
+        return EXIT_FAILURE;
+    }
+
+    if (closeConnection(ctrl, data) != 0) {
+        fprintf(stderr, "Error closing connection\n");
+        return EXIT_FAILURE;
+    }
+
+    printf("Saved file '%s'\n", url.file);
+    return EXIT_SUCCESS;
 }
