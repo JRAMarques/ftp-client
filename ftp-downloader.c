@@ -14,7 +14,7 @@
 #define MAX_LENGTH 1024
 
 #define DEFAULT_USER        "anonymous"
-#define DEFAULT_PASSWORD    "password"
+#define DEFAULT_PASSWORD    "anonymous"
 
 struct FTPURL {
     char user[64];
@@ -23,9 +23,11 @@ struct FTPURL {
     char path[256];
 };
 
+
 int parse_ftp(char* url, struct FTPURL* result){
     if (!url)   return -1;
     if (strncmp(url, "ftp://", 6) != 0){
+        fprintf(stderr, "Invalid URL\n");
         return -1;
     }
 
@@ -33,35 +35,39 @@ int parse_ftp(char* url, struct FTPURL* result){
     strcpy(result->user, DEFAULT_USER);
     strcpy(result->password, DEFAULT_PASSWORD);
 
-    const char *ptr = url + 6;
+    const char* ptr = url+6;   //ftp://
 
     // user:password@
     char *at = strchr(ptr, '@');
+    char *colon = strchr(ptr, ':');
     char *slash = strchr(ptr, '/');
-    if (!slash) return -1;
-
-    if (at && at < slash) {
-        // user:password@host/path
-        char credentials[128];
-        strncpy(credentials, ptr, at - ptr);
-        credentials[at-ptr] = '\0';
-
-        char *colon = strchr(credentials, ':');
-        if (colon) {
-            *colon = '\0';
-            strcpy(result->user, credentials);
-            strcpy(result->password, colon+1);
-        }   else {
-            strcpy(result->user, credentials);
-        }
-        ptr = at + 1;
+    if (!slash){
+        fprintf(stderr, "Invalid URL\n");
+        return -1;
     }
 
-    strncpy(result->host, ptr, slash - ptr);
-    result->host[slash-ptr] ='\0';
-    strcpy(result->path, slash+1);
 
-    //incluir a outra parte
+    if (at && colon && colon < at && at < slash) {
+        // user:password@host/path
+        strncpy(result->user, ptr, colon - ptr);
+        result->user[colon - ptr] = '\0';
+
+        strncpy(result->password, colon+1, at-colon-1);
+        result->password[at-colon-1] = '\0';
+
+        if(strlen(result->user) == 0)
+            strcpy(result->user, DEFAULT_USER);
+        if(strlen(result->password) == 0)
+            strcpy(result->password, DEFAULT_PASSWORD);
+
+        ptr = at+1;
+
+    } 
+
+    strncpy(result->host, ptr, slash-ptr);
+    result->host[slash-ptr]='\0';
+
+    strcpy(result->path, slash+1);
 
     return 0;
 }
@@ -89,39 +95,54 @@ int createSocket(char *ip, int port){
     return sock_fd;
 }
 
-int readResponse(const int socket, char *response, size_t maxLen){
-    if (!response)  return -1;
-    int n = read(socket, response, maxLen-1);
-    if (n > 0)  response[n] = '\0';
-    return n;
+int readResponse(int socket, char *response, size_t size){
+    FILE *fp = fdopen(dup(socket), "r");
+    char line[512];
+    int code = 0;
+    
+    if (!fp)    return -1;
+
+    response[0] = '\0';
+
+    while(fgets(line, sizeof(line), fp)){
+        strncat(response, line, size-strlen(response)-1);
+
+        if(isdigit(line[0]) && isdigit(line[1]) && isdigit(line[2]) && 
+        line[3] == ' '){
+            code=atoi(line);
+            break;
+        }
+    }
+    fclose(fp);
+    return code;
 }
 
 int authConnection(const int socketfd, struct FTPURL url){
-    char buffer[MAX_LENGTH];
+    char response[MAX_LENGTH];
     char cmd[300];
     int code;
 
     snprintf(cmd, sizeof(cmd), "USER %s\r\n", url.user);
     write(socketfd, cmd, strlen(cmd));
 
-    readResponse(socketfd, buffer, sizeof(buffer));
-    printf("%s", buffer);
+    readResponse(socketfd,response, sizeof(response));
+    printf("%s", response);
 
-    if(strncmp(buffer, "230", 3) == 0)  return 0;
+    if(strncmp(response, "230", 3) == 0)  return 0;
 
-    if(strncmp(buffer, "331", 3) != 0){
-        fprintf(stderr, "USER failed: %s\n", buffer);
+    if(strncmp(response, "331", 3) != 0){
+        fprintf(stderr, "USER failed: %s\n", response);
         return -1;
     }
 
     snprintf(cmd, sizeof(cmd), "PASS %s\r\n", url.password);
     write(socketfd, cmd, strlen(cmd));
 
-    readResponse(socketfd, buffer, sizeof(buffer));
-    printf("%s", buffer);
+    readResponse(socketfd, response, sizeof(response));
+    printf("%s", response);
 
-    if (strncmp(buffer, "230", 3) != 0){
-        fprintf(stderr, "PASS failed: %s\n", buffer);
+    if (strncmp(response, "230", 3) != 0){
+        fprintf(stderr, "PASS failed: %s\n",response);
         return -1;
     }
 
@@ -134,7 +155,7 @@ int pasvMode(const int socket, char *ip, int *port){
     char response[MAX_LENGTH];
     if (write(socket, "PASV\r\n", 6) < 0) { perror("write PASV"); return -1; }
     int code = readResponse(socket, response, sizeof(response));
-    if (strncmp(response, "227", 3) != 0) { fprintf(stderr, "PASV failed: %s\n", response); return -1; }
+    if (code != 227)     { fprintf(stderr, "PASV failed: %s\n", response); return -1; }
 
     int h1,h2,h3,h4,p1,p2;
     char *p = strchr(response, '(');
@@ -158,8 +179,7 @@ int requestResource(const int socket, char *resource){
     }
 
     int code = readResponse(socket, response, sizeof(response));
-    if (strncmp(response, "150", 3) != 0 &&
-        strncmp(response, "125", 3) != 0) {
+    if (code!=150 && code!=125) {
         fprintf(stderr, "RETR failed: %s", response);
         return -1;
     }
@@ -175,11 +195,11 @@ int getResource(const int socketA, const int socketB, char *filename){
         return -1;
     }
 
-    char buffer[MAX_LENGTH];
+    char response[MAX_LENGTH];
     ssize_t bytes;
 
-    while ((bytes = read(socketB, buffer, sizeof(buffer))) > 0) {
-        fwrite(buffer,1,bytes,file);
+    while ((bytes = readResponse(socketB, response, sizeof(response))) > 0) {
+        fwrite(response,1,bytes,file);
     }
 
     if (bytes < 0){
@@ -192,25 +212,25 @@ int getResource(const int socketA, const int socketB, char *filename){
     fclose(file);
     close(socketB);
 
-    char response[MAX_LENGTH];
-    int code = readResponse(socketA, response, sizeof(response));
+    char buffer[MAX_LENGTH];
+    int code = readResponse(socketA, buffer, sizeof(buffer));
 
-    if (strncmp(response, "226", 3) != 0){
-        fprintf(stderr, "Transfer failed: %s", response);
+    if (code!=226){
+        fprintf(stderr, "Transfer failed: %s",buffer);
         return -1;
     }
     return 0;
 }
 
 int closeConnection(const int socketCtrl){
-    char buffer[MAX_LENGTH];
+    char response[MAX_LENGTH];
     if (write(socketCtrl, "QUIT\r\n", 6) < 0){
         perror("write QUIT");
         return -1;
     }
-    int code = readResponse(socketCtrl, buffer, sizeof(buffer));
+    int code = readResponse(socketCtrl,response,sizeof(response));
     close(socketCtrl);
-    return (strncmp(buffer, "221", 3) == 0) ? 0 : -1;
+    return (code!=221) ? 0 : -1;
 }
 
 int main(int argc, char *argv[]){
@@ -236,9 +256,9 @@ int main(int argc, char *argv[]){
     int socketA=createSocket(ip, FTP_PORT);
     if (socketA < 0)    return -1;
 
-    char buffer[MAX_LENGTH];
-    readResponse(socketA, buffer, sizeof(buffer));
-    printf("%s", buffer);
+    char response[MAX_LENGTH];
+    readResponse(socketA,response, sizeof(response));
+    printf("%s", response);
 
     if(authConnection(socketA, url) != 0){
         printf("auth error\n");
