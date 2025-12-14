@@ -246,7 +246,6 @@ int main(int argc, char *argv[]){
     }
 
     struct hostent *h;
-
     if ((h = gethostbyname(url.host)) == NULL){
         herror("gethostbyname()");
         return -1;
@@ -274,6 +273,8 @@ int main(int argc, char *argv[]){
         return -1;
     }
 
+    printf("Passive Data Channel: %s:%d\n", dataIP, dataPort);        
+
     int socketB = createSocket(dataIP, dataPort);
     if (socketB < 0){
         closeConnection(socketA);
@@ -290,7 +291,9 @@ int main(int argc, char *argv[]){
     char *filename = strrchr(url.path, '/');
     filename = (filename) ? filename + 1 : url.path;
 
-    if (getResource(socketA, socketB, filename) != 0) {
+    if (getResource(socketA, socketB, filename) == 0){
+        printf("Download successful: %s\n", filename);
+    } else {
         fprintf(stderr, "Download failed\n");
     }
 
